@@ -1,0 +1,24 @@
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict'),crypto=require('crypto');
+let rows=[['id','createdAt','source','name','items','total','status','receipt','requestId','updatedAt']],props={SHEET_ID:'test',STAFF_KEY:'private-test-key'},locked=false;
+const sheet={getLastRow:()=>rows.length,getRange:(r,c,n=1)=>({getValues:()=>rows.slice(r-1,r-1+n).map(x=>x.slice(c-1)),setValue:v=>rows[r-1][c-1]=v}),appendRow:r=>rows.push(r)};
+const ctx={console,PropertiesService:{getScriptProperties:()=>({getProperty:k=>props[k],setProperty:(k,v)=>props[k]=v})},SpreadsheetApp:{openById:()=>({getSheetByName:()=>sheet})},LockService:{getScriptLock:()=>({waitLock:()=>{assert.equal(locked,false);locked=true},releaseLock:()=>locked=false})},Utilities:{getUuid:()=>crypto.randomUUID(),formatDate:()=> '20261110'}};
+vm.createContext(ctx);vm.runInContext(fs.readFileSync('backend/Code.gs','utf8'),ctx);
+let passed=0;function test(name,fn){fn();console.log('PASS '+name);passed++}function create(extra={}){return ctx.api('create',{requestId:crypto.randomUUID(),name:'整合測試',quantities:[1,1,1,1,1],...extra})}
+let order;test('五款與固定125元',()=>{assert.equal(ctx.api('menu').menu.length,5);assert.equal(ctx.api('menu').price,125)});
+test('顧客下單寫入五款合計625',()=>{order=create();assert.equal(order.total,625);assert.equal(rows.length,2)});
+test('同一請求重試不重複寫入',()=>{const r=create({requestId:rows[1][8]});assert.equal(r.id,order.id);assert.equal(rows.length,2)});
+test('無管理金鑰不能查看廚房',()=>assert.throws(()=>ctx.api('list',{})));
+test('無管理金鑰不能代客點餐',()=>assert.throws(()=>create({source:'staff'})));
+test('無管理金鑰不能變更狀態',()=>assert.throws(()=>ctx.api('status',{id:order.id,status:'製作中'})));
+test('錯誤憑證不能查詢',()=>assert.throws(()=>ctx.api('track',{id:order.id,receipt:'wrong'})));
+test('正確憑證可查詢',()=>assert.equal(ctx.api('track',{id:order.id,receipt:order.receipt}).status,'待接單'));
+test('拒絕空單',()=>assert.throws(()=>create({quantities:[0,0,0,0,0]})));
+test('拒絕負數、小數、單款超量及總量超限',()=>{for(const quantities of [[-1,0,0,0,0],[.5,0,0,0,0],[21,0,0,0,0],[20,20,20,0,0]])assert.throws(()=>create({quantities}))});
+test('伺服器忽略客戶端偽造價格',()=>assert.equal(create({price:1,total:1}).total,625));
+test('防止取餐名稱公式注入',()=>{create({name:'=IMPORTXML("test")'});assert.equal(rows.at(-1)[3][0],'\u200b')});
+test('拒絕跳過製作直接完成',()=>assert.throws(()=>ctx.api('status',{key:props.STAFF_KEY,id:order.id,status:'已完成'})));
+test('廚房接單至完成且顧客同步',()=>{for(const status of ['製作中','待取餐','已完成']){ctx.api('status',{key:props.STAFF_KEY,id:order.id,status});assert.equal(ctx.api('track',{id:order.id,receipt:order.receipt}).status,status)}});
+test('店員可建立訂單且來源正確',()=>assert.equal(create({source:'staff',key:props.STAFF_KEY}).source,'店員'));
+test('管理列表不洩漏查詢憑證或請求識別',()=>{const r=ctx.api('list',{key:props.STAFF_KEY})[0];assert.equal(r.receipt,undefined);assert.equal(r.requestId,undefined)});
+test('失敗後鎖均有釋放',()=>assert.equal(locked,false));
+console.log(`${passed} tests passed (mocked Apps Script services; not a live deployment test).`);
